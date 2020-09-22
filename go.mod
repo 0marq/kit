@@ -43,6 +43,7 @@ require (
 	github.com/pkg/errors v0.8.1
 	github.com/prometheus/client_golang v1.3.0
 	github.com/samuel/go-zookeeper v0.0.0-20190923202752-2cc03de413da
+	github.com/segmentio/kafka-go v0.4.2
 	github.com/sirupsen/logrus v1.4.2
 	github.com/smartystreets/goconvey v1.6.4 // indirect
 	github.com/sony/gobreaker v0.4.1
