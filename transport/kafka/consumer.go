@@ -49,13 +49,13 @@ type ConsumerOption func(*Consumer)
 // ConsumerBefore functions are executed on the producer request object before the
 // request is decoded.
 func ConsumerBefore(before ...RequestFunc) ConsumerOption {
-	return func(s *Consumer) { s.before = append(s.before, before...) }
+	return func(c *Consumer) { c.before = append(c.before, before...) }
 }
 
 // ConsumerAfter functions are executed on the consumer reply after the
 // endpoint is invoked, but before anything is published to the reply.
 func ConsumerAfter(after ...ConsumerResponseFunc) ConsumerOption {
-	return func(s *Consumer) { s.after = append(s.after, after...) }
+	return func(c *Consumer) { c.after = append(c.after, after...) }
 }
 
 // ConsumerErrorEncoder is used to encode errors to the consumer reply
@@ -63,7 +63,7 @@ func ConsumerAfter(after ...ConsumerResponseFunc) ConsumerOption {
 // use this to provide custom error formatting. By default,
 // errors will be published with the DefaultErrorEncoder.
 func ConsumerErrorEncoder(ee ErrorEncoder) ConsumerOption {
-	return func(s *Consumer) { s.errorEncoder = ee }
+	return func(c *Consumer) { c.errorEncoder = ee }
 }
 
 // ConsumerErrorLogger is used to log non-terminal errors. By default, no errors
@@ -72,7 +72,7 @@ func ConsumerErrorEncoder(ee ErrorEncoder) ConsumerOption {
 // custom ConsumerErrorEncoder which has access to the context.
 // Deprecated: Use ConsumerErrorHandler instead.
 func ConsumerErrorLogger(logger log.Logger) ConsumerOption {
-	return func(s *Consumer) { s.errorHandler = transport.NewLogErrorHandler(logger) }
+	return func(c *Consumer) { c.errorHandler = transport.NewLogErrorHandler(logger) }
 }
 
 // ConsumerErrorHandler is used to handle non-terminal errors. By default, non-terminal errors
@@ -80,56 +80,65 @@ func ConsumerErrorLogger(logger log.Logger) ConsumerOption {
 // of error handling, including logging in more detail, should be performed in a
 // custom ConsumerErrorEncoder which has access to the context.
 func ConsumerErrorHandler(errorHandler transport.ErrorHandler) ConsumerOption {
-	return func(s *Consumer) { s.errorHandler = errorHandler }
+	return func(c *Consumer) { c.errorHandler = errorHandler }
 }
 
 // ConsumerFinalizer is executed at the end of every request from a producer through Kafka.
 // By default, no finalizer is registered.
 func ConsumerFinalizer(f ...ConsumerFinalizerFunc) ConsumerOption {
-	return func(s *Consumer) { s.finalizer = f }
+	return func(c *Consumer) { c.finalizer = f }
 }
 
-// HandleMsg calls handlers for for received Kafka message
-func (s Consumer) HandleMsg(kw *kafka.Writer) func(msg kafka.Message) {
-	return func(msg kafka.Message) {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
+// HandleMsg calls handlers for received Kafka message
+func (c Consumer) HandleMsg(msg kafka.Message, kw *kafka.Writer) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-		if len(s.finalizer) > 0 {
-			defer func() {
-				for _, f := range s.finalizer {
-					f(ctx, &msg)
-				}
-			}()
-		}
+	if len(c.finalizer) > 0 {
+		defer func() {
+			for _, f := range c.finalizer {
+				f(ctx, &msg)
+			}
+		}()
+	}
 
-		for _, f := range s.before {
-			ctx = f(ctx, &msg)
-		}
+	for _, f := range c.before {
+		ctx = f(ctx, &msg)
+	}
 
-		request, err := s.dec(ctx, msg)
+	request, err := c.dec(ctx, msg)
+	if err != nil {
+		c.errorHandler.Handle(ctx, err)
+		c.errorEncoder(ctx, err, kw)
+		return
+	}
+
+	response, err := c.e(ctx, request)
+	if err != nil {
+		c.errorHandler.Handle(ctx, err)
+		c.errorEncoder(ctx, err, kw)
+		return
+	}
+
+	for _, f := range c.after {
+		ctx = f(ctx, kw)
+	}
+
+	if err := c.enc(ctx, kw, response); err != nil {
+		c.errorHandler.Handle(ctx, err)
+		c.errorEncoder(ctx, err, kw)
+		return
+	}
+}
+
+// Start starts reading messages from reader and call c.HandleMsg for every received msg
+func (c Consumer) Start(ctx context.Context, kr *kafka.Reader, kw *kafka.Writer) {
+	for {
+		msg, err := kr.ReadMessage(ctx)
 		if err != nil {
-			s.errorHandler.Handle(ctx, err)
-			s.errorEncoder(ctx, err, kw)
-			return
+			c.errorHandler.Handle(ctx, err)
 		}
-
-		response, err := s.e(ctx, request)
-		if err != nil {
-			s.errorHandler.Handle(ctx, err)
-			s.errorEncoder(ctx, err, kw)
-			return
-		}
-
-		for _, f := range s.after {
-			ctx = f(ctx, kw)
-		}
-
-		if err := s.enc(ctx, kw, response); err != nil {
-			s.errorHandler.Handle(ctx, err)
-			s.errorEncoder(ctx, err, kw)
-			return
-		}
+		c.HandleMsg(msg, kw)
 	}
 }
 
